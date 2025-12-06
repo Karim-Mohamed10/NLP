@@ -1,0 +1,13 @@
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.11.0
+pytorch-crf>=0.7.2
+flask>=2.2.0
+tqdm
+scikit-learn
+sentencepiece
+regex
+pyarabic
+accelerate
+tensorboard
+regex
