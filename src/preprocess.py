@@ -40,6 +40,7 @@ def clean_line(line: str, remove_urls=True, remove_emails=True, remove_zero_widt
     if remove_urls: s = _URL_RE.sub(" ", s)
     if remove_emails: s = _EMAIL_RE.sub(" ", s)
     if remove_zero_width: s = _ZERO_WIDTH_RE.sub("", s)
+    # Remove Control chars but keep everything else for now
     s = "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
     if normalize_spaces: s = re.sub(r"\s+", " ", s)
     return s.strip()
@@ -65,9 +66,6 @@ def extract_labels(line: str) -> Tuple[str, List[str]]:
             if base_chars:
                 # Attach pending marks to previous base char
                 prev_label = labels[-1]
-                # Combine with existing label if needed (e.g. if we had logical separation)
-                # But typically pending_marks are the full set for the previous char here
-                # We sort to ensure determinism (e.g. Shadda+Fatha == Fatha+Shadda)
                 if pending_marks:
                      combined = "".join(sorted(pending_marks))
                      labels[-1] = combined if prev_label == "_" else prev_label + combined
@@ -83,25 +81,76 @@ def extract_labels(line: str) -> Tuple[str, List[str]]:
 
     return "".join(base_chars), labels
 
+def normalize_base_and_labels(base: str, labels: List[str], options: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str]]:
+    """
+    Normalizes the base text AND filters the labels list in sync.
+    This prevents length mismatches when characters (like punctuation) are removed.
+    """
+    if not options:
+        return base, labels
+
+    out_chars = []
+    out_labels = []
+
+    rem_punct = options.get("remove_punctuation", False)
+    rem_tatweel = options.get("remove_tatweel", True)
+    norm_hamza = options.get("normalize_hamza", True)
+    lower_lat = options.get("lower_latin", True)
+
+    for char, label in zip(base, labels):
+        # 1. Remove Tatweel
+        if rem_tatweel and char == "\u0640":
+            continue
+            
+        # 2. Lowercase Latin
+        if lower_lat and 'A' <= char <= 'Z':
+            char = char.lower()
+            
+        # 3. Normalize Hamza
+        if norm_hamza:
+            if char in "\u0622\u0623\u0625": char = "\u0627"
+        
+        # 4. Handle Punctuation / Non-Alphanumeric
+        # If remove_punctuation is ON, we turn punct into SPACE (to separate words)
+        # We do NOT delete it entirely here, or we risk merging words.
+        # The space collapsing step later will handle excess spaces.
+        if rem_punct:
+            cat = unicodedata.category(char)
+            # Keep Letters(L) and Numbers(N). Turn others to space.
+            if not (cat.startswith('L') or cat.startswith('N')):
+                char = " "
+                label = "_" # Label for space is empty
+
+        # 5. Stream Collapse Spaces
+        if char.isspace():
+            # If the last char we added was also a space, skip this one
+            if out_chars and out_chars[-1] == " ":
+                continue
+            # Otherwise add a single space
+            out_chars.append(" ")
+            out_labels.append("_")
+        else:
+            out_chars.append(char)
+            out_labels.append(label)
+
+    # 6. Trim Leading/Trailing Spaces
+    while out_chars and out_chars[0] == " ":
+        out_chars.pop(0)
+        out_labels.pop(0)
+    while out_chars and out_chars[-1] == " ":
+        out_chars.pop()
+        out_labels.pop()
+
+    return "".join(out_chars), out_labels
+
 def normalize_text(line: str, options: Optional[Dict[str, Any]] = None) -> str:
-    if options is None: options = {}
-    
-    s = line
-    s = unicodedata.normalize("NFKC", s)
-    
-    if options.get("remove_tatweel", True):
-        s = s.replace("\u0640", "")
-    
-    if options.get("normalize_hamza", True):
-        s = s.replace("\u0622", "\u0627").replace("\u0623", "\u0627").replace("\u0625", "\u0627")
-    
-    if options.get("lower_latin", True):
-        s = re.sub(r"[A-Za-z]+", lambda m: m.group(0).lower(), s)
-
-    if options.get("remove_punctuation", False):
-        s = re.sub(r"[^\p{L}\p{N}\s]", " ", s)
-
-    return re.sub(r"\s+", " ", s).strip()
+    """
+    Legacy function for text-only normalization (e.g. inference).
+    """
+    # Reuse the sync logic with dummy labels
+    dummy_labels = ["_"] * len(line)
+    norm_text, _ = normalize_base_and_labels(line, dummy_labels, options)
+    return norm_text
 
 def build_char_vocab(texts: Iterable[str], min_freq: int = 1):
     counter = Counter()
@@ -164,27 +213,31 @@ def parse_file_to_entries(file_path: str,
             line = clean_line(line.rstrip("\n"))
             if not line: continue
             
-            # 1. Extract Base + Labels using ROBUST logic
+            # 1. Extract Base + Labels
             base_text, labels = extract_labels(line)
             if not base_text: continue
             
-            # 2. Normalize Base Text
+            # 2. Normalize BOTH to keep them in sync
+            # This fixes the bug where removing punct caused misalignment
             if normalization_options:
-                base_text = normalize_text(base_text, normalization_options)
+                base_text, labels = normalize_base_and_labels(base_text, labels, normalization_options)
             
-            # 3. Strip diacritics from input (redundant if normalization did it, but safe)
-            if strip_input_diacritics:
-                base_text = strip_diacritics(base_text)
-                
-            # 4. Map to IDs
+            if not base_text: continue
+
+            # 3. Map to IDs
             char_ids = [char2idx.get(c, char2idx[UNK_TOKEN]) for c in base_text]
-            
-            # Safety align
-            if len(labels) != len(base_text):
-                labels = ["_"] * len(base_text) # Fallback
-            
             label_ids = [label2idx.get(l, label2idx["_"]) for l in labels]
             
+            # Safety Check (should pass now)
+            if len(char_ids) != len(label_ids):
+                # This should theoretically not happen with normalize_base_and_labels
+                # But if it does, we must truncate to the shorter one to save data
+                min_len = min(len(char_ids), len(label_ids))
+                char_ids = char_ids[:min_len]
+                label_ids = label_ids[:min_len]
+                base_text = base_text[:min_len]
+                labels = labels[:min_len]
+
             entries.append({
                 "raw": base_text,
                 "labels": labels,

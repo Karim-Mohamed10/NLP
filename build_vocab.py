@@ -1,7 +1,7 @@
 # build_vocab.py
 import os
 from src.config import cfg
-from src.preprocess import clean_line, extract_labels, build_char_vocab, build_label_map, save_json, normalize_text
+from src.preprocess import clean_line, extract_labels, build_char_vocab, build_label_map, save_json, normalize_base_and_labels
 from src.features import feature_mgr
 
 # Options matching Dataset default
@@ -31,8 +31,11 @@ def build_vocabs():
             if not line: continue
             
             base, labels = extract_labels(line)
-            # IMPORTANT: Normalize base text to match Dataset logic
-            base = normalize_text(base, NORM_OPTS)
+            
+            # IMPORTANT: Normalize base AND labels in sync using the new function
+            base, labels = normalize_base_and_labels(base, labels, NORM_OPTS)
+            
+            if not base: continue
             
             all_chars.append(base)
             all_labels.append(labels)
