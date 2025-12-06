@@ -11,6 +11,7 @@ from ..data.collate import collate_fn
 from ..models.bilstm_crf import BiLSTMCRF
 from ..utils.checkpoints import save_checkpoint
 from ..features import feature_mgr
+from ..eval.metrics import DERCalculator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Train")
@@ -22,6 +23,8 @@ def train():
     try:
         char2idx = load_json(os.path.join(cfg.processed_dir, "char2idx.json"))
         label2idx = load_json(os.path.join(cfg.processed_dir, "label2idx.json"))
+        # Create inverse mapping for evaluation
+        idx2label = {v: k for k, v in label2idx.items()}
     except: 
         raise FileNotFoundError(f"Vocab files not found in {cfg.processed_dir}. Run build_vocab.py first.")
     
@@ -58,6 +61,7 @@ def train():
     
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     best_der = 100.0
+    der_calc = DERCalculator()
     
     logger.info("Starting training...")
     
@@ -89,7 +93,9 @@ def train():
             
         # Evaluation Step
         model.eval()
-        total_err, total_cnt = 0, 0
+        
+        all_preds = []
+        all_refs = []
         
         with torch.no_grad():
             for b in val_loader:
@@ -100,23 +106,30 @@ def train():
                 bow = b['bow'].to(cfg.device) if b['bow'] is not None else None
                 tfidf = b['tfidf'].to(cfg.device) if b['tfidf'] is not None else None
                 
-                # Predict
+                # Predict (returns list of lists of indices)
                 preds = model(chars, word_ids, bow, tfidf, mask=mask)
-                refs = b['labels'].cpu().tolist()
                 
-                # Calculate DER (Masked)
+                # Process batch for DER calculation
                 for i, p in enumerate(preds):
+                    # Get valid length from mask to slice the prediction
+                    # The CRF output is usually seq_len, so we must slice it by valid mask length
                     valid_len = int(mask[i].sum().item())
-                    
                     p_valid = p[:valid_len]
-                    r_valid = refs[i][:valid_len]
                     
-                    # Count mismatches
-                    total_err += sum(1 for x, y in zip(p_valid, r_valid) if x != y)
-                    total_cnt += valid_len
+                    # Map indices to labels
+                    p_labels = [idx2label.get(x, '') for x in p_valid]
+                    
+                    # Get reference labels (these are already unpadded list of strings from collate)
+                    r_labels = b['label_strs'][i]
+                    
+                    # Get raw text
+                    raw = b['raws'][i]
+                    
+                    all_preds.append((raw, p_labels))
+                    all_refs.append((raw, r_labels))
 
         # Metrics
-        der = (total_err / total_cnt * 100) if total_cnt > 0 else 0.0
+        der = der_calc.compute(all_refs, all_preds) * 100
         avg_loss = total_loss / len(train_loader)
         
         logger.info(f"Epoch {epoch+1}: Loss={avg_loss:.4f}, DER={der:.2f}%")
@@ -128,7 +141,7 @@ def train():
                 'epoch': epoch, 
                 'model_state': model.state_dict(), 
                 'best_der': best_der,
-                'char2idx': char2idx, # Save vocabs with model for easy inference later
+                'char2idx': char2idx, 
                 'label2idx': label2idx
             }, os.path.join(cfg.models_dir, 'best_bilstm.pt'))
 
