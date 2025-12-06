@@ -39,8 +39,9 @@ def train():
             logger.warning("word2idx.json missing. Word features will be disabled.")
 
     # 3. Create Datasets
-    # Note: Using cfg.val_file as per your configuration
+    logger.info(f"Loading Training Data: {cfg.train_file}")
     train_ds = DiacritizationDataset(cfg.train_file, char2idx, label2idx, word2idx)
+    logger.info(f"Loading Validation Data: {cfg.val_file}")
     val_ds = DiacritizationDataset(cfg.val_file, char2idx, label2idx, word2idx)
     
     train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, collate_fn=collate_fn)
@@ -71,12 +72,10 @@ def train():
         
         # Training Step
         for b in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
-            # Move to device
             chars = b['chars'].to(cfg.device)
             labels = b['labels'].to(cfg.device)
             mask = b['mask'].to(cfg.device)
             
-            # Optional features (check if they exist)
             word_ids = b['word_ids'].to(cfg.device) if b['word_ids'] is not None else None
             bow = b['bow'].to(cfg.device) if b['bow'] is not None else None
             tfidf = b['tfidf'].to(cfg.device) if b['tfidf'] is not None else None
@@ -97,6 +96,9 @@ def train():
         all_preds = []
         all_refs = []
         
+        # Flag to print only the first batch of the epoch for debugging
+        debug_printed = False 
+        
         with torch.no_grad():
             for b in val_loader:
                 chars = b['chars'].to(cfg.device)
@@ -106,25 +108,35 @@ def train():
                 bow = b['bow'].to(cfg.device) if b['bow'] is not None else None
                 tfidf = b['tfidf'].to(cfg.device) if b['tfidf'] is not None else None
                 
-                # Predict (returns list of lists of indices)
+                # Predict
                 preds = model(chars, word_ids, bow, tfidf, mask=mask)
                 
-                # Process batch for DER calculation
+                # Process batch
                 for i, p in enumerate(preds):
-                    # Get valid length from mask to slice the prediction
-                    # The CRF output is usually seq_len, so we must slice it by valid mask length
                     valid_len = int(mask[i].sum().item())
+                    
+                    # 1. Slice to valid length (Remove Padding)
                     p_valid = p[:valid_len]
                     
-                    # Map indices to labels
+                    # 2. Convert indices to strings
                     p_labels = [idx2label.get(x, '') for x in p_valid]
                     
-                    # Get reference labels (these are already unpadded list of strings from collate)
+                    # 3. Get References (already strings)
                     r_labels = b['label_strs'][i]
-                    
-                    # Get raw text
                     raw = b['raws'][i]
                     
+                    # --- DEBUG PRINT START ---
+                    if not debug_printed:
+                        logger.info("\n" + "="*40)
+                        logger.info(f"DEBUG SAMPLE (Epoch {epoch+1})")
+                        logger.info(f"Raw Text: {raw[:50]}...")
+                        logger.info(f"True Labels (First 10): {r_labels[:10]}")
+                        logger.info(f"Pred Labels (First 10): {p_labels[:10]}")
+                        logger.info(f"Lengths -> Raw: {len(raw)}, Ref: {len(r_labels)}, Pred: {len(p_labels)}")
+                        logger.info("="*40 + "\n")
+                        debug_printed = True
+                    # --- DEBUG PRINT END ---
+
                     all_preds.append((raw, p_labels))
                     all_refs.append((raw, r_labels))
 
