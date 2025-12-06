@@ -29,7 +29,7 @@ class Config:
     
     # --- Training Defaults ---
     batch_size: int = 32
-    epochs: int = 10
+    epochs: int = 20
     lr: float = 1e-3
 
     # --- Transformer Defaults (Preserved) ---
